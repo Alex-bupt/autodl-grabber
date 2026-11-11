@@ -1,12 +1,14 @@
-/* AutoDL standard-container clone page UI automation. No network API or tokens. */
+/* AutoDL standard-container clone/create UI automation. No network API or tokens. */
 (function () {
   'use strict';
   const core = globalThis.AutoDLCloneGrabCore;
   if (!core || window.top !== window || document.getElementById('autodl-clone-grabber-panel')) return;
 
-  // Bind this task to the source in the current clone link, not an old instance.
-  const SOURCE_ID = new URL(location.href).searchParams.get('id') || '';
-  const VERSION = chrome.runtime?.getManifest?.().version || '1.3.2';
+  const IS_CREATE = location.pathname === '/create';
+  if (!IS_CREATE && location.pathname !== '/cloneInstance') return;
+  // New rentals share a separate task namespace; clone keys stay compatible.
+  const SOURCE_ID = IS_CREATE ? 'new_instance' : new URL(location.href).searchParams.get('id') || '';
+  const VERSION = chrome.runtime?.getManifest?.().version || '1.4.0';
   const RUN_KEY = 'autodl_clone_grab_run_' + SOURCE_ID;
   const PENDING_KEY = 'autodl_clone_grab_pending_' + SOURCE_ID;
   const SETTINGS_KEY = 'autodl_clone_grab_settings_' + SOURCE_ID;
@@ -15,6 +17,10 @@
   let tabToken = sessionStorage.getItem(TAB_KEY);
   if (!tabToken) { tabToken = crypto.randomUUID(); sessionStorage.setItem(TAB_KEY, tabToken); }
   const ACTIVE_KEY = 'autodl_clone_grab_active_' + SOURCE_ID + '_' + tabToken;
+  const CONTEXT_KEY = ACTIVE_KEY + '_context';
+  const IMAGE_PLACEHOLDER = '请选择框架名称/框架版本/Python版本/CUDA版本';
+  let createContext = null;
+  let restoreOnLoad = false;
   const HOSTS_PER_MODEL = 3;
   const MAX_VIEW_RESTARTS = 3;
   let working = false;
@@ -44,7 +50,7 @@
   panel.id = 'autodl-clone-grabber-panel';
   panel.style.cssText = 'position:fixed;z-index:2147483000;right:16px;top:72px;width:360px;max-height:calc(100vh - 100px);overflow:auto;padding:14px;background:#fff;border:2px solid #5367de;border-radius:10px;box-shadow:0 3px 16px #0003;color:#20243a;font:13px/1.55 Arial,sans-serif';
   panel.innerHTML = '<strong style="font-size:15px">AutoDL 克隆抢机助手 v' + VERSION + '</strong>' +
-    '<div style="margin:5px 0">区域跟随克隆页面 · 单卡 · 按量计费</div>' +
+    '<div style="margin:5px 0">' + (IS_CREATE ? '租用新服务器 · 使用当前地区' : '区域跟随克隆页面') + ' · 单卡 · 按量计费</div>' +
     '<div>先排除显存不足的型号，再检查库存和主机。</div>' +
     '<div>勾选具体 GPU 后，仅检查列表置顶 3 台主机。</div>' +
     '<div>自动识别当前地区的型号，列表变化后重新检查。</div>' +
@@ -58,11 +64,11 @@
       '<label>最低 CUDA<input data-setting="cudaVersion" type="text" placeholder="12.8" style="width:100%;box-sizing:border-box"></label>' +
     '</div>' +
     '<div style="margin-top:5px">扩容填 0 表示不扩容；每轮检查完成后开始倒计时。</div>' +
-    '<div style="color:#9a4c0b">仅克隆系统盘；数据盘需稍后手动复制。</div>' +
+    '<div style="color:#9a4c0b">' + (IS_CREATE ? '先在网页选好基础镜像；刷新后恢复原镜像和地区。' : '仅克隆系统盘；数据盘需稍后手动复制。') + '</div>' +
     '<div style="margin:10px 0"><button type="button" data-action="save">保存设置</button> <button type="button" data-action="check">仅检查（不创建）</button> <button type="button" data-action="start">开始自动抢</button> <button type="button" data-action="stop">停止</button> <button type="button" data-action="reset">检查后重置提交状态</button></div>' +
     '<div data-status style="white-space:pre-wrap;overflow-wrap:anywhere">正在读取设置…</div>';
   document.documentElement.appendChild(panel);
-  panel.querySelector('[data-source]').textContent = '源实例：' + (SOURCE_ID || '未识别');
+  panel.querySelector('[data-source]').textContent = IS_CREATE ? '模式：租用新服务器（基础镜像）' : '源实例：' + (SOURCE_ID || '未识别');
   const statusNode = panel.querySelector('[data-status]');
   const startButton = panel.querySelector('[data-action="start"]');
   const checkButton = panel.querySelector('[data-action="check"]');
@@ -114,7 +120,7 @@
     serial++;
     status(message);
     syncControls();
-    try { await storage.remove(ACTIVE_KEY); }
+    try { await storage.remove([ACTIVE_KEY, CONTEXT_KEY]); }
     catch (_) { status(message + '（无法清除运行配置，请检查扩展权限）'); }
   }
 
@@ -123,6 +129,11 @@
   }
 
   function verifyUrl() {
+    if (IS_CREATE) {
+      const u = new URL(location.href);
+      if (u.origin !== 'https://www.autodl.com' || u.pathname !== '/create') throw new Error('已离开租用新服务器页面，请重新进入并刷新');
+      return;
+    }
     if (core.cloneSourceId(location.href) !== SOURCE_ID) {
       throw new Error('源实例已切换，请刷新页面后重新开始');
     }
@@ -133,7 +144,7 @@
 
   function verifyPage() {
     verifyUrl();
-    const source = [...document.querySelectorAll('.noMachine')].some(e => e.innerText.includes(SOURCE_ID));
+    const source = IS_CREATE || [...document.querySelectorAll('.noMachine')].some(e => e.innerText.includes(SOURCE_ID));
     if (!source) throw new Error('页面未确认指定源实例，可能需要登录或页面已改版');
     const payg = [...document.querySelectorAll('label.el-radio-button')].find(e => e.querySelector('input')?.value === 'payg');
     const single = [...document.querySelectorAll('label.el-radio-button')].find(e => e.querySelector('input')?.value === '1');
@@ -144,6 +155,87 @@
   function visible(element) {
     const r = element.getBoundingClientRect(), css = getComputedStyle(element);
     return r.width > 0 && r.height > 0 && css.display !== 'none' && css.visibility !== 'hidden';
+  }
+
+  const selectedRadio = label => label.getAttribute('aria-checked') === 'true' || label.querySelector('input')?.checked;
+  function imageInput() {
+    return [...document.querySelectorAll('.el-cascader input')].find(input => input.placeholder === IMAGE_PLACEHOLDER && visible(input));
+  }
+
+  function contextRadios() {
+    return [...document.querySelectorAll('label.el-radio-button')]
+      .filter(label => visible(label) && selectedRadio(label) && !['payg', '1', 'basicImage'].includes(label.querySelector('input')?.value))
+      .map(label => ({ value: label.querySelector('input')?.value || '', text: label.innerText.trim() }))
+      .sort((a, b) => a.value.localeCompare(b.value));
+  }
+
+  function validateCreateContext(context) {
+    const shortText = text => typeof text === 'string' && text.trim() === text && text.length > 0 && text.length <= 200;
+    if (!context || context.image?.type !== 'basicImage' || !Array.isArray(context.image.path) ||
+        context.image.path.length !== 4 || !context.image.path.every(shortText) || !Array.isArray(context.radios) ||
+        !context.radios.length || context.radios.length > 8 || !context.radios.every(item => shortText(item.value) && shortText(item.text))) {
+      throw new Error('原镜像或地区配置缺失，请在网页重新选择后启动');
+    }
+    return { image: { type: 'basicImage', path: [...context.image.path] }, radios: context.radios.map(item => ({ ...item })) };
+  }
+
+  function readCreateContext() {
+    const basic = [...document.querySelectorAll('label.el-radio-button')].find(label => label.querySelector('input')?.value === 'basicImage');
+    if (!basic || !selectedRadio(basic)) throw new Error('新租用目前支持基础镜像，请先在网页选择基础镜像');
+    const path = (imageInput()?.value || '').split(/\s*\/\s*/).map(text => text.trim());
+    if (path.length !== 4 || path.some(text => !text)) throw new Error('请先在网页选好完整的基础镜像（框架、版本、Python、CUDA）');
+    return validateCreateContext({ image: { type: 'basicImage', path }, radios: contextRadios() });
+  }
+
+  function assertCreateContext() {
+    if (!IS_CREATE) return;
+    const current = readCreateContext();
+    if (!createContext || JSON.stringify(current.image) !== JSON.stringify(createContext.image)) throw new Error('镜像已变化，请停止后按新镜像重新开始');
+    if (JSON.stringify(current.radios) !== JSON.stringify(createContext.radios)) throw new Error('租用地区或配置已变化，请重新开始');
+  }
+
+  function imageCompatible(host) {
+    if (!IS_CREATE) return true;
+    const cuda = createContext?.image.path[3].match(/^(\d+)\.(\d+)$/);
+    return !cuda || host.cudaMajor > Number(cuda[1]) || (host.cudaMajor === Number(cuda[1]) && host.cudaMinor >= Number(cuda[2]));
+  }
+
+  async function restoreCreateContext(id) {
+    validateCreateContext(createContext);
+    for (const saved of createContext.radios) {
+      assertRunning(id);
+      const label = [...document.querySelectorAll('label.el-radio-button')].find(label =>
+        visible(label) && label.querySelector('input')?.value === saved.value && label.innerText.trim() === saved.text);
+      if (!label || label.querySelector('input')?.disabled) throw new Error('原租用地区已不可用，请重新选择并启动');
+      if (!selectedRadio(label)) { label.click(); await delay(1200); }
+    }
+    assertRunning(id);
+    const basic = [...document.querySelectorAll('label.el-radio-button')].find(label => label.querySelector('input')?.value === 'basicImage');
+    if (!basic || !visible(basic) || basic.querySelector('input')?.disabled) throw new Error('基础镜像选项不可用');
+    if (!selectedRadio(basic)) { basic.click(); await delay(500); }
+    const input = imageInput();
+    if (!input) throw new Error('找不到基础镜像选择器');
+    const expected = createContext.image.path;
+    if (JSON.stringify(input.value.split(/\s*\/\s*/).map(text => text.trim())) !== JSON.stringify(expected)) {
+      input.click();
+      for (let depth = 0; depth < expected.length; depth++) {
+        let node;
+        for (let attempt = 0; attempt < 40; attempt++) {
+          assertRunning(id);
+          const menus = [...document.querySelectorAll('.el-cascader-menu')].filter(visible);
+          const matches = [...(menus[depth]?.querySelectorAll('.el-cascader-node') || [])].filter(item =>
+            (item.querySelector('.el-cascader-node__label')?.textContent || '').trim() === expected[depth]);
+          if (matches.length === 1 && !matches[0].classList.contains('is-disabled') && matches[0].getAttribute('aria-disabled') !== 'true') { node = matches[0]; break; }
+          await delay(100);
+        }
+        if (!node) throw new Error('原基础镜像选项已不可用：' + expected[depth] + '；请重新选择后启动');
+        assertRunning(id);
+        node.click();
+        await delay(200);
+      }
+      await delay(500);
+    }
+    assertCreateContext();
   }
 
   function gpuLabels() {
@@ -169,6 +261,7 @@
   function assertActiveView(id, view) {
     assertRunning(id);
     verifyUrl();
+    assertCreateContext();
     if (inventoryViewKey() !== view) throw new InventoryViewChanged();
   }
 
@@ -176,7 +269,8 @@
     verifyUrl();
     for (let n = 0; n < 80; n++) {
       assertRunning(id);
-      const sourceReady = [...document.querySelectorAll('.noMachine')].some(e => e.innerText.includes(SOURCE_ID));
+      const sourceReady = IS_CREATE ? !![...document.querySelectorAll('label.el-radio-button')].find(label => label.querySelector('input')?.value === 'basicImage') :
+        [...document.querySelectorAll('.noMachine')].some(e => e.innerText.includes(SOURCE_ID));
       if (sourceReady && gpuLabels().length) {
         verifyPage();
         return;
@@ -184,7 +278,7 @@
       status('等待 AutoDL 页面加载…');
       await delay(250);
     }
-    throw new Error('页面加载超时：请确认源实例 ' + SOURCE_ID + ' 和 GPU 型号列表已显示，并检查登录状态');
+    throw new Error('页面加载超时：请确认' + (IS_CREATE ? '租用表单' : '源实例 ' + SOURCE_ID) + ' 和 GPU 型号列表已显示，并检查登录状态');
   }
 
   function liveRows() {
@@ -230,7 +324,7 @@
   async function scanModel(model, id, settings, view) {
     if (!(await setOnlyModel(model, id, settings, view))) return null;
     assertActiveView(id, view);
-    const candidate = liveRows().find(item => sameModel(item.host.model, model) && core.qualifies(item.host, settings));
+    const candidate = liveRows().find(item => sameModel(item.host.model, model) && core.qualifies(item.host, settings) && imageCompatible(item.host));
     if (!candidate) status(model + ' 置顶 3 台主机无符合条件的候选，检查下一型号。');
     return candidate?.host || null;
   }
@@ -254,7 +348,7 @@
         verifyPage();
         if (visibleDialog()) throw new Error('页面有未处理的弹窗，请先处理');
         const item = liveRows().find(row => row.host.id === hostId && sameModel(row.host.model, model));
-        if (!item || !core.qualifies(item.host, settings)) throw new Error('主机已不可选');
+        if (!item || !core.qualifies(item.host, settings) || !imageCompatible(item.host)) throw new Error('主机已不可选或与镜像 CUDA 不兼容');
         const label = item.row.querySelector('label.el-radio');
         if (!label) throw new Error('找不到主机选择控件');
         label.click();
@@ -299,7 +393,7 @@
         verifyPage();
         if (visibleDialog()) throw new Error('页面有未处理的弹窗');
         const selected = liveRows().find(row => row.host.id === host.id);
-        if (!selected?.input.checked || !sameModel(selected.host.model, model) || !core.qualifies(selected.host, limits)) throw new Error('提交前主机检查失败');
+        if (!selected?.input.checked || !sameModel(selected.host.model, model) || !core.qualifies(selected.host, limits) || !imageCompatible(selected.host)) throw new Error('提交前主机检查失败');
         const spin = document.querySelector('input[role="spinbutton"]');
         const disk = [...document.querySelectorAll('label.el-checkbox')].find(e => e.querySelector('input')?.value === '需要扩容');
         if (!disk?.querySelector('input')) throw new Error('提交前数据盘检查失败');
@@ -344,10 +438,12 @@
     }
     for (let left = settings.refreshSeconds; left > 0; left--) {
       assertRunning(id);
+      assertCreateContext();
       status(reason + '，' + left + ' 秒后刷新。');
       await delay(1000);
     }
     assertRunning(id);
+    assertCreateContext();
     const hasPending = await ledger.getPending();
     assertRunning(id);
     if (!hasPending) location.reload();
@@ -393,8 +489,14 @@
   async function monitor(id, settings) {
     for (let restart = 0; restart <= MAX_VIEW_RESTARTS; restart++) {
       await waitForPage(id);
+      if (IS_CREATE && restoreOnLoad) {
+        status('正在恢复本次任务的地区和基础镜像…');
+        await restoreCreateContext(id);
+        restoreOnLoad = false;
+      }
       await delay(1500);
       assertRunning(id);
+      assertCreateContext();
       const view = inventoryViewKey();
       try {
         return await monitorView(id, settings, view);
@@ -426,7 +528,7 @@
         if (!lock) return stop('另一个标签页正在运行同一抢机任务。');
         if (await ledger.getPending()) return stop('存在未核实的提交。请先检查实例列表，再决定是否重置。');
         if (newStart) {
-          await storage.set({ [SETTINGS_KEY]: settings, [ACTIVE_KEY]: settings });
+          await storage.set({ [SETTINGS_KEY]: settings, [ACTIVE_KEY]: settings, ...(IS_CREATE ? { [CONTEXT_KEY]: createContext } : {}) });
           if (id !== serial) return;
           sessionStorage.setItem(RUN_KEY, checkOnly ? 'check' : '1');
           syncControls();
@@ -461,11 +563,13 @@
       if (await ledger.getPending()) return status('存在未核实的提交，先检查实例列表，再点击重置。');
       verifyUrl();
       settings = readFields();
+      if (IS_CREATE) { verifyPage(); createContext = readCreateContext(); restoreOnLoad = false; }
       const message = '开始监控并在符合条件时自动创建并开机？\n' +
         '单卡显存≥' + settings.minVramGB + 'GB；主机可扩容≥' + settings.minExpandableGB + 'GB；实际扩容' + settings.expandGB + 'GB。\n' +
         '单卡≤' + settings.maxHourlyCny + '元/时；CUDA≥' + settings.minCudaMajor + '.' + settings.minCudaMinor + '；每轮后' + settings.refreshSeconds + '秒刷新。\n' +
-        '按量计费，数据盘另行计费；本链接不复制旧数据盘。';
-      if (!checkOnly && !confirm('源实例：' + SOURCE_ID + '\n' + message)) return;
+        '按量计费，数据盘另行计费。' + (IS_CREATE ? '' : '本链接不复制旧数据盘。');
+      const target = IS_CREATE ? '租用新服务器：' + createContext.radios.map(item => item.text).join('、') + '\n基础镜像：' + createContext.image.path.join(' / ') : '源实例：' + SOURCE_ID;
+      if (!checkOnly && !confirm(target + '\n' + message)) return;
       status(checkOnly ? '仅检查已启动；本轮不会创建实例。' : '已启动；请保持本标签页和浏览器打开。');
     } catch (error) { status('无法启动：' + String(error.message || error)); return; }
     finally { busy = false; syncControls(); }
@@ -489,7 +593,7 @@
   async function initialize() {
     syncControls();
     try {
-      const stored = await storage.get([SETTINGS_KEY, ACTIVE_KEY]);
+      const stored = await storage.get([SETTINGS_KEY, ACTIVE_KEY, CONTEXT_KEY]);
       const saved = stored[SETTINGS_KEY] ? core.validateSettings(stored[SETTINGS_KEY]) : core.LIMITS;
       setFields(saved);
       if (await ledger.getPending()) {
@@ -497,7 +601,7 @@
         status('存在未核实的提交。请先检查实例列表；确认后可重置。');
       } else if (checkingOnly()) {
         sessionStorage.removeItem(RUN_KEY);
-        await storage.remove(ACTIVE_KEY);
+        await storage.remove([ACTIVE_KEY, CONTEXT_KEY]);
         status('上次仅检查已中断；可重新点击仅检查，不会自动创建实例。');
       } else if (running()) {
         if (!stored[ACTIVE_KEY]) {
@@ -505,6 +609,7 @@
           status('原运行配置缺失，请检查设置后重新启动。');
         } else {
           const active = core.validateSettings(stored[ACTIVE_KEY]);
+          if (IS_CREATE) { createContext = validateCreateContext(stored[CONTEXT_KEY]); restoreOnLoad = true; }
           setFields(active);
           busy = false; syncControls();
           status('刷新后按原配置恢复监控。');

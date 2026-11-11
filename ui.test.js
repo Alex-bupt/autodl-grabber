@@ -7,6 +7,62 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || 'playwright');
 
+const IMAGE_SELECTOR = '#mock-image .el-cascader input';
+
+async function injectExtension(page) {
+  await page.addScriptTag({path:path.join(__dirname,'core.js')});
+  await page.addScriptTag({path:path.join(__dirname,'content.js')});
+}
+
+const createImageFixture = `
+if (location.pathname === '/create') {
+  document.querySelector('.noMachine').remove();
+  const region = document.querySelector('[data-test-region]');
+  const other = document.createElement('label');
+  other.className = 'el-radio-button'; other.setAttribute('aria-checked', 'false');
+  other.innerHTML = '<input type="radio" name="region" value="test-other-region">另一个测试地区';
+  region.after(other);
+  for (const label of [region, other]) label.addEventListener('click', () => {
+    for (const item of [region, other]) { item.setAttribute('aria-checked', String(item === label)); item.querySelector('input').checked = item === label; }
+  });
+  const mirror = document.createElement('section'); mirror.id = 'mock-image';
+  mirror.innerHTML = '<label class="el-radio-button" aria-checked="true"><input type="radio" name="image-type" value="basicImage" checked>基础镜像</label>' +
+    '<label class="el-radio-button" aria-checked="false"><input type="radio" name="image-type" value="customImage">我的镜像</label>' +
+    '<label class="el-radio-button" aria-checked="false"><input type="radio" name="image-type" value="CodeWithGPU">社区镜像</label>' +
+    '<div class="el-cascader"><input readonly placeholder="请选择框架名称/框架版本/Python版本/CUDA版本"></div>';
+  document.body.append(mirror);
+  for (const label of mirror.querySelectorAll('label')) label.addEventListener('click', () => {
+    for (const item of mirror.querySelectorAll('label')) item.setAttribute('aria-checked', String(item === label));
+  });
+  const image = mirror.querySelector('.el-cascader input');
+  const choices = [['PyTorch','Miniconda'],['2.8.0','2.5.1'],['3.12(ubuntu22.04)'],['12.8','13.0','14.0']];
+  const path = choices.map(items => items[0]);
+  image.value = path.join(' / ');
+  const drop = document.createElement('div'); drop.className = 'el-cascader-panel'; drop.hidden = true;
+  document.body.append(drop);
+  const selected = [];
+  function renderMenus(depth) {
+    while (drop.children.length > depth) drop.lastChild.remove();
+    const menu = document.createElement('div'); menu.className = 'el-cascader-menu';
+    const list = document.createElement('ul'); menu.append(list); drop.append(menu);
+    for (const text of choices[depth]) {
+      const node = document.createElement('li'); node.className = 'el-cascader-node';
+      node.setAttribute('role','menuitem');
+      const label = document.createElement('span'); label.className = 'el-cascader-node__label';
+      const span = document.createElement('span'); span.dataset.title = '标题'; span.textContent = text;
+      label.append(span); node.append(label); list.append(node);
+      node.addEventListener('click', () => {
+        selected[depth] = text;
+        window.__imageClicks = (window.__imageClicks || 0) + 1;
+        if (depth < 3) renderMenus(depth + 1);
+        else { image.value = selected.join(' / '); drop.hidden = true; }
+      });
+    }
+  }
+  image.addEventListener('click', () => { drop.hidden = false; renderMenus(0); });
+}
+`;
+
 const fakePage = `<!doctype html><html><head><style>
 .el-table__body-wrapper { height:120px; overflow:auto; }
 tr { height:35px; } .el-message { position:fixed; top:5px; left:5px; background:#fff; }
@@ -37,6 +93,7 @@ if (mode === 'slow-page') {
   source.innerText = '';
   setTimeout(() => { source.innerText = '以实例：' + sourceId + '的系统创建新实例'; }, 6000);
 }
+${createImageFixture}
 let count = 0, loading = false;
 window.__submitted = 0;
 function renderRow(i) {
@@ -115,7 +172,7 @@ async function start(mode, existingContext, values = {}, options = {}) {
   if (!existingContext) {
     await context.route('**/*', route => {
       const u = new URL(route.request().url());
-      if (u.origin === 'https://www.autodl.com' && u.pathname === '/cloneInstance')
+      if (u.origin === 'https://www.autodl.com' && ['/cloneInstance','/create'].includes(u.pathname))
         return route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: fakePage });
       return route.abort();
     });
@@ -143,15 +200,17 @@ async function start(mode, existingContext, values = {}, options = {}) {
   }
   const page = await context.newPage();
   const copy = mode === 'copy-on' ? '1' : '';
-  const url = new URL('https://www.autodl.com/cloneInstance');
+  const url = new URL('https://www.autodl.com/' + (options.create ? 'create' : 'cloneInstance'));
   if (options.urlRegion !== null) url.searchParams.set('region', options.urlRegion ?? 'west-E');
-  if (options.sourceId !== null) url.searchParams.set('id', options.sourceId ?? 'demo-source-12345678');
+  if (!options.create && options.sourceId !== null) url.searchParams.set('id', options.sourceId ?? 'demo-source-12345678');
   url.searchParams.set('copy_data_disk', copy);
   url.searchParams.set('test_mode', mode);
   if (options.hostModel) url.searchParams.set('test_model', options.hostModel);
   if (options.hostVram) url.searchParams.set('test_vram', String(options.hostVram));
   if (options.goodIndex !== undefined) url.searchParams.set('test_good_index', String(options.goodIndex));
   await page.goto(url.href);
+  if (options.imagePath !== undefined) await page.locator('#mock-image .el-cascader input').evaluate((input, value) => { input.value = value; }, options.imagePath);
+  if (options.imageType) await page.locator('#mock-image input[value="' + options.imageType + '"]').click();
   if (options.inventory) await page.evaluate(inventory => {
     const old = document.querySelector('input[value="RTX 6000D"]').closest('label');
     const group = document.createElement('div');
@@ -858,5 +917,128 @@ test('invalid settings cannot arm the watcher', async () => {
     await page.locator('[data-status]').getByText(/刷新间隔必须/).waitFor({timeout:12000});
     assert.equal(await page.evaluate(() => window.__submitted), 0);
     assert.equal(await page.evaluate(() => sessionStorage.getItem('autodl_clone_grab_run_demo-source-12345678')), null);
+  } finally { await context.close(); }
+});
+
+test('new rentals check a top-three host with the selected image and never submit in check mode', async () => {
+  const {context,page} = await start('success', undefined, {}, {create:true, checkOnly:true});
+  try {
+    await page.locator('[data-status]').getByText(/仅检查完成.*未创建实例/).waitFor({timeout:12000});
+    assert.equal(await page.locator('.noMachine').count(), 0);
+    assert.match(await page.locator('[data-source]').innerText(), /租用新服务器/);
+    assert.equal(await page.locator('input[name="host"]:checked').inputValue(), 'mockhost2');
+    assert.equal(await page.evaluate(() => window.__submitted), 0);
+    assert.equal(await page.locator(IMAGE_SELECTOR).inputValue(), 'PyTorch / 2.8.0 / 3.12(ubuntu22.04) / 12.8');
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('mockScrollRequests')), null);
+  } finally { await context.close(); }
+});
+
+test('new rentals submit once and confirm the selected region and image', async () => {
+  const {context,page} = await start('success', undefined, {}, {create:true});
+  try {
+    await page.locator('[data-status]').getByText(/平台报告创建成功/).waitFor({timeout:12000});
+    assert.equal(await page.evaluate(() => window.__submitted), 1);
+    const confirm = await page.evaluate(() => window.__lastConfirm);
+    assert.match(confirm, /租用新服务器.*西北B区/);
+    assert.match(confirm, /基础镜像：PyTorch \/ 2.8.0 \/ 3.12\(ubuntu22.04\) \/ 12.8/);
+    assert.doesNotMatch(confirm, /源实例/);
+    assert.ok(await page.evaluate(() => localStorage.getItem('__test_extension_storage__autodl_clone_grab_pending_new_instance')));
+    assert.equal(await page.evaluate(() => localStorage.getItem('__test_extension_storage__autodl_clone_grab_pending_demo-source-12345678')), null);
+  } finally { await context.close(); }
+});
+
+test('new rentals require a complete base image and refuse unsupported image modes', async t => {
+  for (const option of [{imagePath:''}, {imagePath:'PyTorch / 2.8.0'}, {imageType:'customImage'}, {imageType:'CodeWithGPU'}]) {
+    await t.test(JSON.stringify(option), async () => {
+      const {context,page} = await start('success', undefined, {}, {create:true, ...option});
+      try {
+        await page.locator('[data-status]').getByText(/无法启动.*基础镜像/).waitFor({timeout:12000});
+        assert.equal(await page.evaluate(() => window.__submitted), 0);
+        assert.equal(await page.evaluate(() => window.__lastConfirm), undefined);
+      } finally { await context.close(); }
+    });
+  }
+});
+
+test('a new rental stops if the image changes during host preparation', async () => {
+  const {context,page} = await start('success', undefined, {}, {create:true, autoStart:false});
+  try {
+    await page.evaluate(() => {
+      document.querySelector('input[name="host"][value="mockhost2"]').addEventListener('change', () => {
+        document.querySelector('#mock-image .el-cascader input').value = 'Miniconda / 2.8.0 / 3.12(ubuntu22.04) / 12.8';
+      });
+    });
+    await page.locator('[data-action="start"]').click();
+    await page.locator('[data-status]').getByText(/镜像已变化/).waitFor({timeout:12000});
+    assert.equal(await page.evaluate(() => window.__submitted), 0);
+    assert.equal(await page.evaluate(() => localStorage.getItem('__test_extension_storage__autodl_clone_grab_pending_new_instance')), null);
+  } finally { await context.close(); }
+});
+
+test('a new rental requires the host to support the chosen image CUDA too', async () => {
+  const {context,page} = await start('success', undefined, {}, {create:true, checkOnly:true, imagePath:'PyTorch / 2.8.0 / 3.12(ubuntu22.04) / 14.0'});
+  try {
+    await page.locator('[data-status]').getByText(/仅检查完成.*未找到符合条件/).waitFor({timeout:12000});
+    assert.equal(await page.locator('input[name="host"]:checked').count(), 0);
+    assert.equal(await page.evaluate(() => window.__submitted), 0);
+  } finally { await context.close(); }
+});
+
+test('a new rental restores the confirmed image and region after refresh before submitting', async () => {
+  const {context,page} = await start('success', undefined, {}, {create:true, autoStart:false});
+  try {
+    await page.locator(IMAGE_SELECTOR).evaluate(input => { input.value = 'Miniconda / 2.5.1 / 3.12(ubuntu22.04) / 12.8'; });
+    await page.locator('input[value="test-other-region"]').click();
+    await page.locator('[data-action="start"]').click();
+    // Reload while waiting for the model/host, before any simulated order.
+    await page.waitForFunction(() => sessionStorage.getItem('autodl_clone_grab_run_new_instance') === '1');
+    await page.reload();
+    assert.equal(await page.locator(IMAGE_SELECTOR).inputValue(), 'PyTorch / 2.8.0 / 3.12(ubuntu22.04) / 12.8');
+    await injectExtension(page);
+    await page.locator('[data-status]').getByText(/平台报告创建成功/).waitFor({timeout:12000});
+    assert.equal(await page.locator(IMAGE_SELECTOR).inputValue(), 'Miniconda / 2.5.1 / 3.12(ubuntu22.04) / 12.8');
+    assert.equal(await page.locator('input[value="test-other-region"]').isChecked(), true);
+    assert.equal(await page.evaluate(() => window.__imageClicks), 4);
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('mockTotalSubmitted')), '1');
+  } finally { await context.close(); }
+});
+
+test('a missing saved rental image stops resumption before any paid click', async () => {
+  const {context,page} = await start('success', undefined, {}, {create:true, autoStart:false});
+  try {
+    await page.locator('[data-action="start"]').click();
+    await page.waitForFunction(() => sessionStorage.getItem('autodl_clone_grab_run_new_instance') === '1');
+    await page.reload();
+    await page.evaluate(() => {
+      for (const key of Object.keys(localStorage)) if (key.endsWith('_context')) localStorage.removeItem(key);
+    });
+    await injectExtension(page);
+    await page.locator('[data-status]').getByText(/原镜像或地区配置缺失/).waitFor({timeout:12000});
+    assert.equal(await page.evaluate(() => window.__submitted), 0);
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('autodl_clone_grab_run_new_instance')), null);
+  } finally { await context.close(); }
+});
+
+test('an unavailable saved image stops restoration without falling back to a default', async () => {
+  const {context,page} = await start('success', undefined, {}, {create:true, autoStart:false});
+  try {
+    await page.locator(IMAGE_SELECTOR).evaluate(input => { input.value = 'RemovedFramework / 2.8.0 / 3.12(ubuntu22.04) / 12.8'; });
+    await page.locator('[data-action="start"]').click();
+    await page.waitForFunction(() => sessionStorage.getItem('autodl_clone_grab_run_new_instance') === '1');
+    await page.reload();
+    await injectExtension(page);
+    await page.locator('[data-status]').getByText(/原基础镜像选项已不可用：RemovedFramework/).waitFor({timeout:12000});
+    assert.equal(await page.evaluate(() => window.__submitted), 0);
+  } finally { await context.close(); }
+});
+
+test('new rental check-only interruptions never turn into paid monitoring after reload', async () => {
+  const {context,page} = await start('success', undefined, {}, {create:true, autoStart:false});
+  try {
+    await page.evaluate(() => sessionStorage.setItem('autodl_clone_grab_run_new_instance', 'check'));
+    await page.reload();
+    await injectExtension(page);
+    await page.locator('[data-status]').getByText(/上次仅检查已中断/).waitFor({timeout:12000});
+    assert.equal(await page.evaluate(() => window.__submitted), 0);
   } finally { await context.close(); }
 });

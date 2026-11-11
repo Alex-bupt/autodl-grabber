@@ -1,6 +1,6 @@
 {
   "name": "autodl-clone-grabber",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "private": true,
   "description": "AutoDL 克隆页 GPU 库存监控与 Top 3 主机筛选 Chrome 扩展",
   "engines": { "node": ">=20" },
