@@ -1,0 +1,14 @@
+{
+  "name": "autodl-clone-grabber",
+  "version": "1.3.2",
+  "private": true,
+  "description": "AutoDL 克隆页 GPU 库存监控与 Top 3 主机筛选 Chrome 扩展",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test core.test.js ui.test.js",
+    "test:core": "node --test core.test.js",
+    "test:ui": "node --test ui.test.js",
+    "check": "node --check core.js && node --check content.js"
+  },
+  "devDependencies": { "playwright": "1.62.1" }
+}
